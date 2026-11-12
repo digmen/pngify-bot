@@ -58,3 +58,11 @@ test('строка статуса', () => {
   assert.equal(statusLine({ ...st, p: 5, m: 'zip' }), 'Готово: 5 страниц в архиве за 8 с');
   assert.equal(statusLine({ ...st, s: 'queue', q: 2 }), 'В очереди: ты 2-й');
 });
+
+test('«рисую и отправляю»: полоска от 10 до 100 по отправленным страницам', () => {
+  const st: CardState = { s: 'stream', n: 'a', x: 'pptx', z: '1 МБ', p: 4, i: 0, m: 'png' };
+  assert.equal(progress(st), 10);
+  assert.equal(progress({ ...st, i: 2 }), 55);
+  assert.equal(progress({ ...st, i: 4 }), 100);
+  assert.equal(statusLine({ ...st, i: 3 }), 'Рисую и отправляю 3/4');
+});

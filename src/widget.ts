@@ -6,7 +6,7 @@
  * Сети в виджете нет: картинки в карточку не кладём, они приходят отдельными файлами.
  */
 
-export type Stage = 'ask' | 'queue' | 'load' | 'conv' | 'render' | 'pack' | 'send' | 'done' | 'err' | 'gone';
+export type Stage = 'ask' | 'queue' | 'load' | 'conv' | 'render' | 'stream' | 'pack' | 'send' | 'done' | 'err' | 'gone';
 export type Mode = 'png' | 'zip';
 
 export interface CardState {
@@ -73,6 +73,7 @@ const STAGE_TEXT: Record<Stage, string> = {
   load: 'Скачиваю файл',
   conv: 'Открываю документ',
   render: 'Рисую страницы',
+  stream: 'Рисую и отправляю',
   pack: 'Упаковываю ZIP',
   send: 'Отправляю',
   done: 'Готово',
@@ -86,6 +87,7 @@ export function statusLine(st: CardState): string {
   switch (st.s) {
     case 'queue': return st.q ? `В очереди: ты ${st.q}-й` : 'В очереди';
     case 'render': return `Рисую страницы${pages}`;
+    case 'stream': return `Рисую и отправляю${pages}`;
     case 'send': return `Отправляю${pages}`;
     case 'done': {
       const n = st.p ?? 0;
@@ -109,6 +111,8 @@ export function progress(st: CardState): number | null {
   const frac = st.p ? Math.min(1, (st.i ?? 0) / st.p) : 0;
   switch (st.s) {
     case 'render': return Math.round(10 + 70 * frac);
+    // «Картинками»: страница рисуется и сразу уходит, поэтому одна полоска на обе работы.
+    case 'stream': return Math.round(10 + 90 * frac);
     case 'pack': return 85;
     case 'send': return st.m === 'zip' ? null : Math.round(85 + 15 * frac);
     case 'done': return 100;
@@ -170,8 +174,8 @@ var r=el('div','r');[['Картинками','png'],['ZIP-архивом','zip']
 if(note)el('div','m',note).style.marginTop='8px';return}
 if(st==='err'||st==='gone'){el('div','er',st==='gone'?NOTE.gone:(s.e||'Что-то пошло не так'));return}
 if(st==='done'){bar(100,'✓ Готово',(p?p+' '+(s.m==='zip'?pl(p,'страница','страницы','страниц')+' в архиве':pl(p,'картинка','картинки','картинок')):'')+(s.t?' · за '+s.t+' с':''));B.querySelector('.t span').className='ok';return}
-var L={queue:'В очереди'+(s.q?' · ты '+s.q+'-й':''),load:'Скачиваю файл',conv:'Открываю документ',render:'Рисую страницы',pack:'Упаковываю ZIP',send:s.m==='zip'?'Отправляю архив':'Отправляю картинки'};
-var pc={render:Math.round(10+70*f),pack:85,send:s.m==='zip'?null:Math.round(85+15*f)}[st];
-bar(pc==null?null:pc,L[st]||'',[(st==='render'||st==='send'&&s.m!=='zip')&&p?k+' из '+p:'',q].filter(Boolean).join(' · '))}
+var L={queue:'В очереди'+(s.q?' · ты '+s.q+'-й':''),load:'Скачиваю файл',conv:'Открываю документ',render:'Рисую страницы',stream:'Рисую и отправляю',pack:'Упаковываю ZIP',send:s.m==='zip'?'Отправляю архив':'Отправляю картинки'};
+var pc={render:Math.round(10+70*f),stream:Math.round(10+90*f),pack:85,send:s.m==='zip'?null:Math.round(85+15*f)}[st];
+bar(pc==null?null:pc,L[st]||'',[(st==='render'||st==='stream'||st==='send'&&s.m!=='zip')&&p?k+' из '+p:'',q].filter(Boolean).join(' · '))}
 if(W.onEvent)W.onEvent('chatDataChanged',R);R();if(W.ready)W.ready();
 </script>`;

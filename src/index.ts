@@ -1,7 +1,7 @@
 import { copyFile, link, mkdir, open, readdir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { Bot, GrammyError, HttpError, InputFile, InputMediaBuilder, type Api } from 'grammy';
+import { Bot, GrammyError, HttpError, InputFile, type Api } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { loadConfig } from './config.js';
 import { KIND_LABEL, SUPPORTED_HINT, checkSignature, detectKind, humanSize, pngName, safeBaseName } from './formats.js';
@@ -261,15 +261,24 @@ async function verifyFile(job: Job, input: string): Promise<void> {
   }
 }
 
+/**
+ * Одна картинка — одно сообщение, строго по порядку страниц: следующая уходит только после
+ * того, как Telegram принял предыдущую. Альбомы не используем: внутри альбома клиент может
+ * показать файлы не в том порядке, а пользователь ждёт «страница 1 первой».
+ */
+async function sendPage(job: Job, file: string, name: string, page: number): Promise<void> {
+  await bot.api.sendDocument(job.chatId, new InputFile(file, name), { disable_notification: page > 1 });
+  job.sent = page;
+  store.save();
+}
+
+/** Уже нарисованные картинки (запасной путь, когда ZIP не влез) — по одной, по порядку. */
 async function sendPngs(job: Job, files: string[], names: string[]): Promise<void> {
-  for (let i = 0; i < files.length; i += 10) {
-    const chunk = files.slice(i, i + 10);
-    if (chunk.length === 1) {
-      await bot.api.sendDocument(job.chatId, new InputFile(chunk[0], names[i]));
-    } else {
-      await bot.api.sendMediaGroup(job.chatId, chunk.map((f, j) => InputMediaBuilder.document(new InputFile(f, names[i + j]))));
-    }
-    setState(job, { s: 'send', i: Math.min(i + 10, files.length) });
+  for (let k = 0; k < files.length; k++) {
+    if (k + 1 <= (job.sent ?? 0)) continue;
+    if (stopping) throw new Error('остановка бота');
+    await sendPage(job, files[k], names[k], k + 1);
+    setState(job, { s: 'send', i: k + 1 });
   }
 }
 
@@ -310,14 +319,30 @@ async function processJob(job: Job): Promise<void> {
     if (total > limit) throw new ConvertError(`${total} > ${limit}`, `В файле ${total} страниц, а можно до ${limit}. Раздели файл на части.`);
 
     const base = safeBaseName(job.fileName);
+    if (mode === 'png') {
+      // Нарисовал страницу — сразу отправил: первая картинка у человека через секунды,
+      // и порядок «первая вошла — первая вышла». После перезапуска продолжаем с неотправленной.
+      const already = Math.min(job.sent ?? 0, total);
+      setState(job, { s: 'stream', p: total, i: already });
+      for (let page = already + 1; page <= total; page++) {
+        if (stopping) throw new Error('остановка бота');
+        const file = await renderPage(pdf, page, dpiOf(h), path.join(dir, `p${page}`), opts);
+        await sendPage(job, file, pngName(base, page, total), page);
+        await rm(file, { force: true });
+        setState(job, { i: page });
+      }
+    }
+
     const files: string[] = [];
     const names: string[] = [];
-    setState(job, { s: 'render', p: total, i: 0 });
-    for (let page = 1; page <= total; page++) {
-      if (stopping) throw new Error('остановка бота');
-      files.push(await renderPage(pdf, page, dpiOf(h), path.join(dir, `p${page}`), opts));
-      names.push(pngName(base, page, total));
-      setState(job, { i: page });
+    if (mode === 'zip') {
+      setState(job, { s: 'render', p: total, i: 0 });
+      for (let page = 1; page <= total; page++) {
+        if (stopping) throw new Error('остановка бота');
+        files.push(await renderPage(pdf, page, dpiOf(h), path.join(dir, `p${page}`), opts));
+        names.push(pngName(base, page, total));
+        setState(job, { i: page });
+      }
     }
 
     if (mode === 'zip') {
@@ -335,9 +360,6 @@ async function processJob(job: Job): Promise<void> {
         setState(job, { s: 'send', i: 0, m: 'png' });
         await sendPngs(job, files, names);
       }
-    } else {
-      setState(job, { s: 'send', i: 0 });
-      await sendPngs(job, files, names);
     }
     stats.done++;
     stats.pages += total;
