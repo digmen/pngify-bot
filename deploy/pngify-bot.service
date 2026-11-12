@@ -1,0 +1,29 @@
+# /etc/systemd/system/pngify-bot.service
+# Бот работает от отдельного пользователя pngify, а не от root, и с потолком памяти:
+# сервер общий с VPN-ботами, тяжёлый документ не должен их задеть.
+# ProtectKernelTunables/ProtectControlGroups не ставим: с ними bubblewrap не может смонтировать свой /proc
+# (проверено 12.11.2026). Изоляцию чужого файла даёт bubblewrap: без сети, всё только на чтение.
+[Unit]
+Description=@PngifyBot - documents to PNG
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pngify
+Group=pngify
+WorkingDirectory=/opt/pngify-bot
+EnvironmentFile=/etc/pngify-bot.env
+ExecStart=/opt/pngify-bot/node_modules/.bin/tsx src/index.ts
+Restart=always
+RestartSec=5
+Nice=10
+MemoryMax=1500M
+MemoryHigh=1200M
+CPUQuota=200%
+TasksMax=256
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/pngify
+
+[Install]
+WantedBy=multi-user.target
