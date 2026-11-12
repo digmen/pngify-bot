@@ -6,7 +6,7 @@
  * Сети в виджете нет: картинки в карточку не кладём, они приходят отдельными файлами.
  */
 
-export type Stage = 'ask' | 'queue' | 'conv' | 'render' | 'pack' | 'send' | 'done' | 'err' | 'gone';
+export type Stage = 'ask' | 'queue' | 'load' | 'conv' | 'render' | 'pack' | 'send' | 'done' | 'err' | 'gone';
 export type Mode = 'png' | 'zip';
 
 export interface CardState {
@@ -70,6 +70,7 @@ export function plural(n: number, one: string, few: string, many: string): strin
 const STAGE_TEXT: Record<Stage, string> = {
   ask: 'Выбери, как прислать',
   queue: 'В очереди',
+  load: 'Скачиваю файл',
   conv: 'Открываю документ',
   render: 'Рисую страницы',
   pack: 'Упаковываю ZIP',
@@ -100,23 +101,34 @@ export function caption(st: CardState): string {
   return `${st.n} — ${statusLine(st)}`;
 }
 
-/** Процент для полосы прогресса: открытие ~10%, рисование до 80%, упаковка 85%, отправка до 100%. */
-export function progress(st: CardState): number {
+/**
+ * Процент для полосы прогресса или null, если конец заранее не известен (очередь, скачивание,
+ * открытие документа, отправка архива): тогда полоска «бежит». Рисование 10–80%, упаковка 85%, отправка до 100%.
+ */
+export function progress(st: CardState): number | null {
   const frac = st.p ? Math.min(1, (st.i ?? 0) / st.p) : 0;
   switch (st.s) {
-    case 'conv': return 8;
     case 'render': return Math.round(10 + 70 * frac);
     case 'pack': return 85;
-    case 'send': return Math.round(85 + 15 * frac);
+    case 'send': return st.m === 'zip' ? null : Math.round(85 + 15 * frac);
     case 'done': return 100;
+    case 'queue': case 'load': case 'conv': return null;
     default: return 0;
   }
 }
 
+/** Полоска для текстовой карточки: «▰▰▰▰▱▱▱▱▱▱ 40%». */
+export function textBar(st: CardState): string {
+  const pct = progress(st);
+  if (pct === null) return '▰▱▰▱▰▱▰▱▰▱';
+  const full = Math.floor(pct / 10); // вниз: полоска не обгоняет реальный ход
+  return `${'▰'.repeat(full)}${'▱'.repeat(10 - full)} ${pct}%`;
+}
+
 export const CARD_HTML = String.raw`<style>
-body{margin:0;padding:10px 12px 12px}
+body{margin:0;padding:12px 12px calc(12px + env(safe-area-inset-bottom))}
 .h{display:flex;gap:10px;align-items:center}
-.i{flex:none;width:38px;height:38px;border-radius:10px;background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color);display:flex;align-items:center;justify-content:center;font:700 11px system-ui,sans-serif}
+.i{flex:none;width:40px;height:40px;border-radius:11px;background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color);display:flex;align-items:center;justify-content:center;font:700 11px system-ui,sans-serif}
 .w{min-width:0}
 .n{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .m{color:var(--tg-theme-hint-color);font-size:.85em}
@@ -124,35 +136,42 @@ body{margin:0;padding:10px 12px 12px}
 .g button{flex:1;background:none;color:var(--tg-theme-text-color);border-radius:7px;padding:6px;font-size:.9em}
 .g .on{background:var(--tg-theme-bg-color);font-weight:600}
 .r{display:flex;gap:8px}.r button{flex:1}
-.b{height:6px;border-radius:3px;background:var(--tg-theme-secondary-bg-color);margin:12px 0 6px;overflow:hidden}
-.b i{display:block;height:100%;background:var(--tg-theme-button-color);transition:width .4s}
+.t{display:flex;justify-content:space-between;align-items:baseline;margin-top:14px;font-size:.92em}
+.t b{font-variant-numeric:tabular-nums}
+.b{position:relative;height:10px;border-radius:5px;background:var(--tg-theme-secondary-bg-color);margin:7px 0 6px;overflow:hidden}
+.b i{position:absolute;left:0;top:0;bottom:0;border-radius:5px;background:var(--tg-theme-button-color);transition:width .5s ease}
+.b.u i{width:35%;animation:k 1.3s ease-in-out infinite}
+@keyframes k{from{transform:translateX(-110%)}to{transform:translateX(300%)}}
+@media (prefers-reduced-motion:reduce){.b.u i{animation:none;left:32%}}
 .ok{color:var(--tg-theme-accent-text-color);font-weight:600}
-.er{color:var(--tg-theme-destructive-text-color)}
+.er{color:var(--tg-theme-destructive-text-color);margin-top:12px}
 </style>
 <div class="h"><div class="i" id="x"></div><div class="w"><div class="n" id="n"></div><div class="m" id="m"></div></div></div>
 <div id="b"></div>
 <script>
 var W=window.TelegramWidget||{},B=document.getElementById('b'),hq=0,busy=0,note='';
+var NOTE={gone:'Файл устарел, пришли его ещё раз',busy:'Этот файл уже в работе',many:'Дождись, пока закончатся прошлые файлы',full:'Очередь переполнена, попробуй через минуту'};
 try{hq=+localStorage.getItem('hq')||0}catch(e){}
 function S(){try{return JSON.parse(W.chatData)||{}}catch(e){return{}}}
-function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;B.appendChild(e);return e}
+function el(t,c,x,p){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;(p||B).appendChild(e);return e}
+function pl(n,a,b,c){var x=n%100,y=x%10;return x>10&&x<20?c:y==1?a:y>1&&y<5?b:c}
 function go(m){if(busy)return;busy=1;note='Отправляю…';R();
-W.request('go:'+m+':'+hq).then(function(a){busy=0;note=a&&a.result==='gone'?'Файл устарел, пришли его ещё раз':'';R()},
+W.request('go:'+m+':'+hq).then(function(a){busy=0;note=NOTE[a&&a.result]||'';R()},
 function(e){busy=0;note=e&&e.code==='RATE_LIMITED'?'Слишком часто, подожди пару секунд':'Не вышло'+(e&&e.code?' ('+e.code+')':'')+', нажми ещё раз';R()})}
-function R(){var s=S(),st=s.s||'ask',p=s.p||0,k=s.i||0;
+function bar(pc,lab,sub){var t=el('div','t');el('span','',lab,t);el('b','',pc==null?'':pc+'%',t);
+var b=el('div','b'+(pc==null?' u':''));el('i','',null,b).style.width=pc==null?'':pc+'%';if(sub)el('div','m',sub)}
+function R(){var s=S(),st=s.s||'ask',p=s.p||0,k=s.i||0,f=p?Math.min(1,k/p):0,q=s.h?'чёткое':'';
 document.getElementById('x').textContent=(s.x||'file').slice(0,4).toUpperCase();
 document.getElementById('n').textContent=s.n||'Файл';
 document.getElementById('m').textContent=[s.z,p?p+' стр.':''].filter(Boolean).join(' · ');
 B.textContent='';
-if(st==='ask'){var g=el('div','g');['Обычное','Чёткое'].forEach(function(t,j){var b=document.createElement('button');b.textContent=t;if(hq===j)b.className='on';b.onclick=function(){hq=j;try{localStorage.setItem('hq',j)}catch(e){}R()};g.appendChild(b)});
-var r=el('div','r');[['Картинками','png'],['ZIP-архивом','zip']].forEach(function(a){var b=document.createElement('button');b.textContent=a[0];b.disabled=!!busy;b.onclick=function(){go(a[1])};r.appendChild(b)});
-if(note)el('div','m',note).style.marginTop='6px';return}
-function pl(n,a,b,c){var x=n%100,y=x%10;return x>10&&x<20?c:y==1?a:y>1&&y<5?b:c}
-var f=p?Math.min(1,k/p):0,pc={conv:8,render:10+70*f,pack:85,send:85+15*f,done:100}[st]||0;
-if(st==='done'){el('div','ok',(p?'Готово: '+p+' '+(s.m==='zip'?pl(p,'страница','страницы','страниц')+' в архиве':pl(p,'картинка','картинки','картинок')):'Готово')+(s.t?' за '+s.t+' с':'')).style.marginTop='10px';return}
-if(st==='err'||st==='gone'){el('div','er',st==='gone'?'Файл устарел, пришли его ещё раз':(s.e||'Что-то пошло не так')).style.marginTop='10px';return}
-el('div','b').appendChild(document.createElement('i')).style.width=Math.round(pc)+'%';
-var L={queue:'В очереди'+(s.q?': ты '+s.q+'-й':''),conv:'Открываю документ…',render:'Рисую страницы',pack:'Упаковываю ZIP…',send:'Отправляю'};
-el('div','m',(L[st]||'')+((st==='render'||st==='send')&&p?' '+k+' из '+p:'')+(s.h?' · чёткое':''))}
+if(st==='ask'){var g=el('div','g');['Обычное','Чёткое'].forEach(function(t,j){var b=el('button',hq===j?'on':'',t,g);b.onclick=function(){hq=j;try{localStorage.setItem('hq',j)}catch(e){}R()}});
+var r=el('div','r');[['Картинками','png'],['ZIP-архивом','zip']].forEach(function(a){var b=el('button','',a[0],r);b.disabled=!!busy;b.onclick=function(){go(a[1])}});
+if(note)el('div','m',note).style.marginTop='8px';return}
+if(st==='err'||st==='gone'){el('div','er',st==='gone'?NOTE.gone:(s.e||'Что-то пошло не так'));return}
+if(st==='done'){bar(100,'✓ Готово',(p?p+' '+(s.m==='zip'?pl(p,'страница','страницы','страниц')+' в архиве':pl(p,'картинка','картинки','картинок')):'')+(s.t?' · за '+s.t+' с':''));B.querySelector('.t span').className='ok';return}
+var L={queue:'В очереди'+(s.q?' · ты '+s.q+'-й':''),load:'Скачиваю файл',conv:'Открываю документ',render:'Рисую страницы',pack:'Упаковываю ZIP',send:s.m==='zip'?'Отправляю архив':'Отправляю картинки'};
+var pc={render:Math.round(10+70*f),pack:85,send:s.m==='zip'?null:Math.round(85+15*f)}[st];
+bar(pc==null?null:pc,L[st]||'',[(st==='render'||st==='send'&&s.m!=='zip')&&p?k+' из '+p:'',q].filter(Boolean).join(' · '))}
 if(W.onEvent)W.onEvent('chatDataChanged',R);R();if(W.ready)W.ready();
 </script>`;

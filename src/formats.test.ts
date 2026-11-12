@@ -29,3 +29,21 @@ test('размер', () => {
   assert.equal(humanSize(3 * 1024 * 1024), '3 МБ');
   assert.equal(humanSize(2.5 * 1024 * 1024), '2.5 МБ');
 });
+
+test('подпись файла: настоящий, под паролем, мусор', async () => {
+  const { checkSignature } = await import('./formats.js');
+  const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]);
+  const ole = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0]);
+  const junk = Buffer.from([0x13, 0x00, 0xff, 0x8a, 0x02, 0x7f, 0x00, 0x11]);
+  assert.equal(checkSignature('pptx', zip), 'ok');
+  assert.equal(checkSignature('docx', ole), 'encrypted');
+  assert.equal(checkSignature('docx', junk), 'mismatch');
+  assert.equal(checkSignature('ppt', ole), 'ok');
+  assert.equal(checkSignature('doc', Buffer.from('{\\rtf1\\ansi')), 'ok');
+  assert.equal(checkSignature('ppt', junk), 'mismatch');
+  assert.equal(checkSignature('pdf', Buffer.from('%PDF-1.7\n')), 'ok');
+  assert.equal(checkSignature('pdf', junk), 'mismatch');
+  assert.equal(checkSignature('txt', Buffer.from('Привет, мир\nстрока 2')), 'ok');
+  assert.equal(checkSignature('csv', junk), 'mismatch');
+  assert.equal(checkSignature('odt', zip), 'ok');
+});

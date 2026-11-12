@@ -2,6 +2,8 @@ export interface Config {
   token: string;
   ownerId: number | null;
   workDir: string;
+  /** Где лежит список задач (jobs.json), чтобы переживать перезапуск. */
+  dataDir: string;
   maxFileBytes: number;
   ownerMaxFileBytes: number;
   /** Адрес Bot API. Свой сервер (--local) снимает предел 20 МБ: файлы до 2 ГБ. */
@@ -41,6 +43,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     token,
     ownerId: Number.isFinite(owner) ? owner : null,
     workDir: env.WORK_DIR?.trim() || '/var/lib/pngify/jobs',
+    dataDir: env.DATA_DIR?.trim() || '/var/lib/pngify/data',
     maxFileBytes: mb(env.MAX_FILE_MB, 200, local),
     ownerMaxFileBytes: mb(env.OWNER_MAX_FILE_MB, 2000, local),
     apiRoot,
