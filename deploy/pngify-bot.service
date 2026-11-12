@@ -5,8 +5,9 @@
 # (проверено 12.11.2026). Изоляцию чужого файла даёт bubblewrap: без сети, всё только на чтение.
 [Unit]
 Description=@PngifyBot - documents to PNG
-After=network-online.target
-Wants=network-online.target
+# Свой сервер Bot API — контейнер pngify-bot-api (см. README), бот ходит к нему на 127.0.0.1:8083.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
 
 [Service]
 User=pngify

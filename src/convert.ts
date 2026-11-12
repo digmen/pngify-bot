@@ -40,12 +40,16 @@ export function run(cmd: string, args: string[], opts: RunOptions): Promise<stri
     const keep = (b: Buffer) => { out = (out + b.toString()).slice(-4000); };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
-    const timer = setTimeout(() => child.kill('SIGKILL'), opts.timeoutSec * 1000);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, opts.timeoutSec * 1000);
     child.on('error', (e) => { clearTimeout(timer); reject(e); });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      if (signal === 'SIGKILL') {
+      if (timedOut) {
         reject(new ConvertError(`${cmd}: таймаут ${opts.timeoutSec} с`, 'Файл слишком долго открывается. Попробуй файл поменьше или сохрани его в PDF.'));
+      } else if (signal === 'SIGKILL') {
+        // Не наш таймер — значит, процесс убил потолок памяти службы.
+        reject(new ConvertError(`${cmd}: убит (память)`, 'Файл слишком тяжёлый для сервера. Раздели его на части или сожми картинки внутри.'));
       } else if (code !== 0) {
         reject(new ConvertError(`${cmd}: код ${code}: ${out.slice(-500)}`, 'Не получилось открыть файл. Возможно, он повреждён или защищён паролем.'));
       } else {

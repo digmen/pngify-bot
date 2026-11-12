@@ -1,4 +1,4 @@
-import { link, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Bot, InputFile, InputMediaBuilder, type Api } from 'grammy';
@@ -11,7 +11,7 @@ import { dpiOf, parseGo, type CardState, type Mode } from './widget.js';
 
 try { process.loadEnvFile(); } catch { /* .env не обязателен: на сервере переменные даёт systemd */ }
 const cfg = loadConfig();
-const bot = new Bot(cfg.token);
+const bot = new Bot(cfg.token, { client: { apiRoot: cfg.apiRoot } });
 const queue = new SerialQueue();
 
 /** Файл, присланный пользователем. Скачивается только когда дошла очередь, до этого на диске ничего нет. */
@@ -30,7 +30,9 @@ interface Job {
 }
 
 const JOB_TTL_MS = 24 * 3600_000;
-const ZIP_MAX_BYTES = 49 * 1024 * 1024; // бот может отправить файл до 50 МБ
+// Облачный Bot API принимает от бота файлы до 50 МБ, свой сервер — до 2000 МБ.
+const UPLOAD_MAX_BYTES = (cfg.localApi ? 2000 : 49) * 1024 * 1024;
+const mbOf = (bytes: number) => Math.round(bytes / 1024 / 1024);
 const jobsByMessage = new Map<string, Job>();
 const lastJobOfUser = new Map<number, Job>();
 const stats = { files: 0, done: 0, errors: 0, pages: 0, since: new Date().toISOString() };
@@ -58,7 +60,7 @@ const HELP = [
   'Пришли файл — верну каждую страницу или слайд отдельной PNG-картинкой.',
   '',
   `Форматы: ${SUPPORTED_HINT}.`,
-  `До ${Math.round(cfg.maxFileBytes / 1024 / 1024)} МБ и ${cfg.maxPages} страниц.`,
+  `До ${mbOf(cfg.maxFileBytes)} МБ и ${cfg.maxPages} страниц.`,
   '',
   'В карточке файла выбери качество и как прислать: картинками или одним ZIP.',
   'Если карточка не открылась — команды /png и /zip для последнего файла.',
@@ -81,8 +83,9 @@ bot.on('message:document', async (ctx) => {
     await ctx.reply(`Этот формат не умею. Подойдут: ${SUPPORTED_HINT}.`);
     return;
   }
-  if ((doc.file_size ?? 0) > cfg.maxFileBytes) {
-    await ctx.reply(`Файл больше ${Math.round(cfg.maxFileBytes / 1024 / 1024)} МБ — Telegram не даёт боту скачать такой. Сожми его или сохрани в PDF.`);
+  const maxBytes = isOwner(ctx.from.id) ? cfg.ownerMaxFileBytes : cfg.maxFileBytes;
+  if ((doc.file_size ?? 0) > maxBytes) {
+    await ctx.reply(`Файл больше ${mbOf(maxBytes)} МБ — такой не возьму. Сожми его или раздели на части.`);
     return;
   }
   stats.files++;
@@ -152,9 +155,23 @@ bot.use(async (ctx, next) => {
 async function download(api: Api, job: Job, dir: string): Promise<string> {
   const file = await api.getFile(job.fileId);
   if (!file.file_path) throw new ConvertError('нет file_path', 'Telegram не отдал файл. Пришли его ещё раз.');
+  const input = path.join(dir, `input.${job.ext}`);
+  if (cfg.localApi) {
+    // Свой сервер Bot API уже положил файл на диск и вернул путь внутри своего контейнера.
+    // Забираем файл себе (перемещением): у сервера копия не остаётся.
+    if (!file.file_path.startsWith(`${cfg.botapiDirContainer}/`)) throw new ConvertError(`чужой путь: ${file.file_path}`, 'Telegram не отдал файл. Пришли его ещё раз.');
+    const hostPath = path.join(cfg.botapiDirHost, file.file_path.slice(cfg.botapiDirContainer.length));
+    if (!path.resolve(hostPath).startsWith(`${path.resolve(cfg.botapiDirHost)}/`)) throw new ConvertError(`путь вне каталога: ${hostPath}`, 'Telegram не отдал файл. Пришли его ещё раз.');
+    try {
+      await rename(hostPath, input);
+    } catch {
+      await copyFile(hostPath, input);
+      await rm(hostPath, { force: true });
+    }
+    return input;
+  }
   const res = await fetch(`https://api.telegram.org/file/bot${cfg.token}/${file.file_path}`);
   if (!res.ok) throw new ConvertError(`скачивание: ${res.status}`, 'Не получилось скачать файл. Пришли его ещё раз.');
-  const input = path.join(dir, `input.${job.ext}`);
   await writeFile(input, Buffer.from(await res.arrayBuffer()));
   return input;
 }
@@ -203,12 +220,12 @@ async function processJob(job: Job, mode: Mode, h: 0 | 1): Promise<void> {
       await mkdir(named);
       const namedFiles = await Promise.all(files.map(async (f, k) => { const p = path.join(named, names[k]); await link(f, p); return p; }));
       const zip = await makeZip(path.join(dir, `${base}.zip`), namedFiles, opts);
-      if ((await stat(zip)).size <= ZIP_MAX_BYTES) {
+      if ((await stat(zip)).size <= UPLOAD_MAX_BYTES) {
         setState(job, { s: 'send', i: 0 });
         await bot.api.sendDocument(job.chatId, new InputFile(zip, `${base}.zip`));
         setState(job, { i: total });
       } else {
-        await bot.api.sendMessage(job.chatId, 'Архив вышел больше 50 МБ — Telegram такой не пропустит. Шлю картинками.');
+        await bot.api.sendMessage(job.chatId, `Архив вышел больше ${mbOf(UPLOAD_MAX_BYTES)} МБ — Telegram такой не пропустит. Шлю картинками.`);
         setState(job, { s: 'send', i: 0 });
         await sendPngs(job, files, names);
       }
@@ -244,7 +261,7 @@ async function main(): Promise<void> {
   ]);
   await bot.start({
     allowed_updates: ['message', 'callback_query', 'widget_query'] as never,
-    onStart: (me) => console.log(`[bot] @${me.username} запущен, песочница: ${cfg.sandbox ? 'да' : 'нет'}`),
+    onStart: (me) => console.log(`[bot] @${me.username} запущен, песочница: ${cfg.sandbox ? 'да' : 'нет'}, Bot API: ${cfg.localApi ? 'свой сервер' : 'облачный'}`),
   });
 }
 
